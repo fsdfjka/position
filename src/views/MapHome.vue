@@ -55,7 +55,7 @@ function fitPadding() {
   if (window.innerWidth <= 660) {
     return { paddingTopLeft: [28, 28], paddingBottomRight: [28, 96] }
   }
-  return { paddingTopLeft: [40, 36], paddingBottomRight: [56, 76] }
+  return { paddingTopLeft: [18, 22], paddingBottomRight: [30, 48] }
 }
 
 function styleOf(road) {
@@ -600,9 +600,9 @@ onBeforeUnmount(() => {
   z-index: 20;
   display: flex;
   flex-direction: column;
-  width: 316px;
+  width: 240px;
   flex-shrink: 0;
-  padding: 34px 26px 22px;
+  padding: 26px 16px 18px;
   background: linear-gradient(180deg, rgba(255, 252, 245, 0.72), rgba(231, 223, 208, 0.65));
   border-right: 1px solid var(--hairline);
   box-shadow: 1px 0 0 rgba(255, 255, 255, 0.5) inset;
@@ -610,7 +610,7 @@ onBeforeUnmount(() => {
 }
 
 .rail.is-closed {
-  margin-left: -316px;
+  margin-left: -240px;
 }
 
 .rail-close {
@@ -643,9 +643,10 @@ onBeforeUnmount(() => {
 
 .eyebrow {
   margin: 0 0 14px;
+  padding-right: 46px;
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 9px;
-  letter-spacing: 2.4px;
+  font-size: 8.5px;
+  letter-spacing: 1.8px;
   color: var(--ink-soft);
   opacity: 0.75;
 }
@@ -653,7 +654,7 @@ onBeforeUnmount(() => {
 .title {
   margin: 0;
   font-family: 'Songti SC', 'STSong', 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
-  font-size: 40px;
+  font-size: 34px;
   font-weight: 700;
   line-height: 1.06;
   letter-spacing: 2px;
@@ -713,7 +714,8 @@ onBeforeUnmount(() => {
 
 .legend {
   display: flex;
-  gap: 18px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
   padding: 10px 0 0;
   font-size: 10px;
   letter-spacing: 0.4px;
@@ -1111,7 +1113,7 @@ onBeforeUnmount(() => {
   z-index: 25;
   display: flex;
   flex-direction: column;
-  width: 296px;
+  width: 232px;
   flex-shrink: 0;
   background: #14161a;
   color: #e6dfd1;
@@ -1120,19 +1122,19 @@ onBeforeUnmount(() => {
 }
 
 .monitor.is-closed {
-  margin-right: -296px;
+  margin-right: -232px;
 }
 
 .mon-head {
   position: relative;
-  padding: 26px 20px 16px;
+  padding: 22px 16px 14px;
   border-bottom: 1px solid rgba(230, 223, 209, 0.12);
 }
 
 .mon-close {
   position: absolute;
-  top: 24px;
-  right: 20px;
+  top: 20px;
+  right: 16px;
   padding: 3px 8px;
   font-family: inherit;
   font-size: 9.5px;
@@ -1239,7 +1241,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 3px 8px;
   width: 100%;
-  padding: 10px 20px 10px 18px;
+  padding: 10px 16px 10px 15px;
   font-family: inherit;
   text-align: left;
   color: inherit;
@@ -1299,7 +1301,7 @@ onBeforeUnmount(() => {
 
 .cam-list {
   margin: 0 0 10px;
-  padding: 0 20px 2px 40px;
+  padding: 0 16px 2px 34px;
   list-style: none;
 }
 
@@ -1421,7 +1423,7 @@ onBeforeUnmount(() => {
     right: 0;
     bottom: 0;
     z-index: 40;
-    width: 300px;
+    width: 260px;
     transform: translateX(100%);
     transition: transform 0.32s ease;
     box-shadow: -10px 0 30px rgba(20, 22, 26, 0.22);
