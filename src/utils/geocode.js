@@ -1,8 +1,6 @@
 import roadData from '@/assets/geo/main-roads.json'
-import monitorData from '@/assets/geo/monitor-points.json'
 
 const roads = roadData.roads
-const intersections = monitorData.intersections
 
 function normalize(value) {
   return String(value || '')
@@ -11,22 +9,7 @@ function normalize(value) {
     .replace(/[交叉路口口×xX·，,。]/g, '')
 }
 
-const knownPoints = new Map()
 const roadsByName = new Map()
-
-intersections.forEach((item) => {
-  knownPoints.set(normalize(item.name), {
-    lat: item.lat,
-    lng: item.lng,
-    label: item.name,
-  })
-  if (item.roads) knownPoints.set(normalize(item.roads), {
-    lat: item.lat,
-    lng: item.lng,
-    label: item.roads,
-  })
-})
-
 roads.forEach((road) => {
   roadsByName.set(normalize(road.name), road)
 })
@@ -99,9 +82,6 @@ function midpointOfRoad(road) {
 export function localGeocode(value) {
   const query = String(value || '').trim()
   if (!query) return null
-
-  const key = normalize(query)
-  if (knownPoints.has(key)) return knownPoints.get(key)
 
   const roadNames = splitRoads(query)
   if (roadNames.length === 2) {
