@@ -1,13 +1,19 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import quanzhouGeo from '@/assets/geo/licheng-fengze.json'
 import roadData from '@/assets/geo/main-roads.json'
-import monitorData from '@/assets/geo/monitor-points.json'
+import { useMonitorStore } from '@/stores/monitor'
+
+const router = useRouter()
+const monitorStore = useMonitorStore()
 
 const roads = roadData.roads
-const intersections = monitorData.intersections
+const intersections = computed(() => monitorStore.points)
+const totalIntersections = computed(() => monitorStore.totalIntersections)
+const totalCameras = computed(() => monitorStore.totalCameras)
 
 const DIR = {
   horizontal: { label: '横向', color: '#b23a2f' },
@@ -31,6 +37,46 @@ const vertical = computed(() =>
 const mainCount = computed(() => roads.filter((r) => r.tier === 'main').length)
 const minorCount = computed(() => roads.filter((r) => r.tier === 'minor').length)
 
+const searchResults = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return { intersections: [], roads: [] }
+
+  const matchIntersection = (item) => {
+    const haystack = [
+      item.name,
+      item.roads,
+      ...(item.cameras ?? []).map((cam) => `${cam.scene} ${cam.dir}`),
+    ]
+      .join(' ')
+      .toLowerCase()
+    return query.split(/\s+/).every((token) => haystack.includes(token)) || haystack.includes(query)
+  }
+
+  const intersectionsMatches = intersections.value
+    .filter(matchIntersection)
+    .sort((a, b) => {
+      const aStarts = a.name.toLowerCase().startsWith(query) ? 0 : 1
+      const bStarts = b.name.toLowerCase().startsWith(query) ? 0 : 1
+      return aStarts - bStarts
+    })
+    .slice(0, 8)
+
+  const roadMatches = roads
+    .filter((road) => road.name.toLowerCase().includes(query))
+    .sort((a, b) => {
+      const aStarts = a.name.toLowerCase().startsWith(query) ? 0 : 1
+      const bStarts = b.name.toLowerCase().startsWith(query) ? 0 : 1
+      return aStarts - bStarts
+    })
+    .slice(0, 5)
+
+  return { intersections: intersectionsMatches, roads: roadMatches }
+})
+
+const hasSearchResults = computed(
+  () => searchResults.value.intersections.length > 0 || searchResults.value.roads.length > 0,
+)
+
 const mapEl = ref(null)
 const selectedRoad = ref('')
 const showLabels = ref(true)
@@ -38,6 +84,8 @@ const loaded = ref(false)
 const activePoint = ref('')
 const railOpen = ref(true)
 const panelOpen = ref(window.innerWidth > 1180)
+const searchQuery = ref('')
+const searchOpen = ref(false)
 
 let map = null
 let districtLayer = null
@@ -55,7 +103,7 @@ function fitPadding() {
   if (window.innerWidth <= 660) {
     return { paddingTopLeft: [28, 28], paddingBottomRight: [28, 96] }
   }
-  return { paddingTopLeft: [18, 22], paddingBottomRight: [30, 48] }
+  return { paddingTopLeft: [40, 36], paddingBottomRight: [56, 76] }
 }
 
 function styleOf(road) {
@@ -145,7 +193,7 @@ function cameraIcon(item, active, compact = false) {
 function updateCameraIcons() {
   if (!map) return
   const compact = map.getZoom() < 13
-  intersections.forEach((item) => {
+  intersections.value.forEach((item) => {
     camMarkers[item.id]?.setIcon(cameraIcon(item, item.id === activePoint.value, compact))
   })
 }
@@ -153,17 +201,56 @@ function updateCameraIcons() {
 function selectPoint(id) {
   activePoint.value = activePoint.value === id ? '' : id
   const compact = map && map.getZoom() < 13
-  intersections.forEach((item) => {
+  intersections.value.forEach((item) => {
     camMarkers[item.id]?.setIcon(cameraIcon(item, item.id === activePoint.value, compact))
   })
   if (!activePoint.value) return
-  const item = intersections.find((x) => x.id === activePoint.value)
+  const item = intersections.value.find((x) => x.id === activePoint.value)
   if (!item || !map) return
   if (window.innerWidth <= 1180) panelOpen.value = true
   map.flyTo([item.lat, item.lng], Math.max(map.getZoom(), 15.5), { duration: 0.6 })
   requestAnimationFrame(() => {
     document.querySelector(`[data-point="${item.id}"]`)?.scrollIntoView({ block: 'nearest' })
   })
+}
+
+function goAdd() {
+  router.push('/monitor/new')
+}
+
+function editPoint(id) {
+  router.push(`/monitor/${encodeURIComponent(id)}/edit`)
+}
+
+function pickIntersection(id) {
+  searchQuery.value = ''
+  searchOpen.value = false
+  selectPoint(id)
+}
+
+function pickRoad(name) {
+  searchQuery.value = ''
+  searchOpen.value = false
+  selectRoad(name)
+}
+
+function pickFirstSearchResult() {
+  const firstIntersection = searchResults.value.intersections[0]
+  const firstRoad = searchResults.value.roads[0]
+  if (firstIntersection) pickIntersection(firstIntersection.id)
+  else if (firstRoad) pickRoad(firstRoad.name)
+}
+
+function clearSearch() {
+  searchQuery.value = ''
+  searchOpen.value = false
+}
+
+function deletePoint(id) {
+  const point = intersections.value.find((item) => item.id === id)
+  if (!point) return
+  const confirmed = window.confirm(`确定删除点位「${point.name}」及其 ${point.cameras.length} 台相机吗？`)
+  if (confirmed) monitorStore.removePoint(id)
 }
 
 function addDistrictNames(layer) {
@@ -315,10 +402,45 @@ function resetView() {
   selectedRoad.value = ''
   refreshStyles()
   activePoint.value = ''
-  intersections.forEach((item) => camMarkers[item.id]?.setIcon(cameraIcon(item, false, true)))
+  intersections.value.forEach((item) => camMarkers[item.id]?.setIcon(cameraIcon(item, false, true)))
   if (map && districtBounds) {
     map.flyToBounds(districtBounds, { ...fitPadding(), duration: 0.6 })
   }
+}
+
+function syncCameraMarkers() {
+  if (!map) return
+  const ids = new Set(intersections.value.map((item) => item.id))
+  if (activePoint.value && !ids.has(activePoint.value)) activePoint.value = ''
+  Object.keys(camMarkers).forEach((id) => {
+    if (ids.has(id)) return
+    camMarkers[id].remove()
+    delete camMarkers[id]
+  })
+
+  const compact = map.getZoom() < 13
+  intersections.value.forEach((item) => {
+    const tooltip = `${item.name} · ${item.cameras.length} 台`
+    if (camMarkers[item.id]) {
+      camMarkers[item.id].setLatLng([item.lat, item.lng])
+      camMarkers[item.id].setIcon(cameraIcon(item, item.id === activePoint.value, compact))
+      camMarkers[item.id].setTooltipContent(tooltip)
+      return
+    }
+    camMarkers[item.id] = L.marker([item.lat, item.lng], {
+      icon: cameraIcon(item, item.id === activePoint.value, compact),
+      keyboard: false,
+      riseOnHover: true,
+      pane: 'camPane',
+    })
+      .bindTooltip(tooltip, {
+        direction: 'top',
+        offset: [0, -20],
+        className: 'cam-tip',
+      })
+      .on('click', () => selectPoint(item.id))
+      .addTo(map)
+  })
 }
 
 onMounted(() => {
@@ -368,21 +490,7 @@ onMounted(() => {
   labelLayerGroup = L.layerGroup().addTo(map)
   map.createPane('camPane').style.zIndex = 605
 
-  intersections.forEach((item) => {
-    camMarkers[item.id] = L.marker([item.lat, item.lng], {
-      icon: cameraIcon(item, false),
-      keyboard: false,
-      riseOnHover: true,
-      pane: 'camPane',
-    })
-      .bindTooltip(`${item.name} · ${item.cameras.length} 台`, {
-        direction: 'top',
-        offset: [0, -20],
-        className: 'cam-tip',
-      })
-      .on('click', () => selectPoint(item.id))
-      .addTo(map)
-  })
+  syncCameraMarkers()
 
   L.control.zoom({ position: 'topright' }).addTo(map)
 
@@ -397,6 +505,12 @@ onMounted(() => {
 
   loaded.value = true
 })
+
+watch(
+  () => monitorStore.points,
+  () => syncCameraMarkers(),
+  { deep: true },
+)
 
 let resizeTimer = null
 let wasWide = window.innerWidth > 1180
@@ -503,6 +617,66 @@ onBeforeUnmount(() => {
     <main class="stage">
       <div ref="mapEl" class="map" :class="{ 'is-loaded': loaded }"></div>
 
+      <div class="search" :class="{ 'has-results': searchOpen && searchQuery }">
+        <div class="search-box">
+          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+            <circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <path d="M13 13 L17.5 17.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          <input
+            v-model="searchQuery"
+            type="text"
+            placeholder="搜索路口、道路关键词"
+            aria-label="搜索路口或道路"
+            @focus="searchOpen = true"
+            @input="searchOpen = true"
+            @blur="searchOpen = false"
+            @keydown.enter.prevent="pickFirstSearchResult"
+            @keydown.esc="clearSearch"
+          />
+          <button v-if="searchQuery" type="button" class="search-clear" @mousedown.prevent="clearSearch">×</button>
+        </div>
+
+        <div v-if="searchOpen && searchQuery" class="search-results">
+          <template v-if="searchResults.intersections.length">
+            <p class="search-group">路口点位</p>
+            <button
+              v-for="item in searchResults.intersections"
+              :key="item.id"
+              type="button"
+              class="search-item"
+              @mousedown.prevent="pickIntersection(item.id)"
+            >
+              <span class="search-pin"></span>
+              <span class="search-main">
+                <b>{{ item.name }}</b>
+                <i>{{ item.roads }}</i>
+              </span>
+              <span class="search-count">{{ item.cameras.length }}</span>
+            </button>
+          </template>
+
+          <template v-if="searchResults.roads.length">
+            <p class="search-group">道路</p>
+            <button
+              v-for="road in searchResults.roads"
+              :key="road.name"
+              type="button"
+              class="search-item"
+              @mousedown.prevent="pickRoad(road.name)"
+            >
+              <span class="search-road-line"></span>
+              <span class="search-main">
+                <b>{{ road.name }}</b>
+                <i>{{ road.dir === 'vertical' ? '纵向' : '横向' }} · {{ road.type }}</i>
+              </span>
+            </button>
+          </template>
+
+          <p v-if="!hasSearchResults" class="search-empty">未找到相关路口或道路</p>
+        </div>
+      </div>
+
       <div class="frame">
         <span class="corner tl"></span>
         <span class="corner tr"></span>
@@ -531,12 +705,13 @@ onBeforeUnmount(() => {
 
     <aside class="monitor" :class="{ open: panelOpen, 'is-closed': !panelOpen }">
       <header class="mon-head">
-        <p class="mon-eyebrow">TRAFFIC CAM · {{ monitorData.total.cameras }}</p>
+        <p class="mon-eyebrow">TRAFFIC CAM · {{ totalCameras }}</p>
         <h2>路口监控点位</h2>
+        <button type="button" class="mon-add" @click="goAdd">+ 添加</button>
         <button type="button" class="panel-close mon-close" @click="togglePanel">收起</button>
         <div class="mon-meta">
-          <span>{{ monitorData.total.intersections }} 个路口</span>
-          <span>{{ monitorData.total.cameras }} 路相机</span>
+          <span>{{ totalIntersections }} 个路口</span>
+          <span>{{ totalCameras }} 路相机</span>
         </div>
         <div class="mon-legend">
           <span><i class="dot traffic"></i>路口交通机</span>
@@ -551,12 +726,23 @@ onBeforeUnmount(() => {
           :data-point="item.id"
           :class="{ on: activePoint === item.id }"
         >
-          <button type="button" class="mon-row" @click="selectPoint(item.id)">
+          <div
+            class="mon-row"
+            role="button"
+            tabindex="0"
+            @click="selectPoint(item.id)"
+            @keydown.enter="selectPoint(item.id)"
+            @keydown.space.prevent="selectPoint(item.id)"
+          >
             <span class="mon-no">{{ String(idx + 1).padStart(2, '0') }}</span>
             <span class="mon-name">{{ item.name }}</span>
             <span class="mon-road">{{ item.roads }}</span>
-            <span class="mon-count">{{ item.cameras.length }}</span>
-          </button>
+            <span class="mon-tools">
+              <button type="button" class="mon-edit" title="修改点位" @click.stop="editPoint(item.id)">✎</button>
+              <button type="button" class="mon-del" title="删除点位" @click.stop="deletePoint(item.id)">✕</button>
+              <span class="mon-count">{{ item.cameras.length }}</span>
+            </span>
+          </div>
           <ul v-if="activePoint === item.id" class="cam-list">
             <li v-for="(cam, ci) in item.cameras" :key="ci">
               <i class="cam-dot" :class="cam.type"></i>
@@ -600,9 +786,9 @@ onBeforeUnmount(() => {
   z-index: 20;
   display: flex;
   flex-direction: column;
-  width: 240px;
+  width: 316px;
   flex-shrink: 0;
-  padding: 26px 16px 18px;
+  padding: 34px 26px 22px;
   background: linear-gradient(180deg, rgba(255, 252, 245, 0.72), rgba(231, 223, 208, 0.65));
   border-right: 1px solid var(--hairline);
   box-shadow: 1px 0 0 rgba(255, 255, 255, 0.5) inset;
@@ -610,7 +796,7 @@ onBeforeUnmount(() => {
 }
 
 .rail.is-closed {
-  margin-left: -240px;
+  margin-left: -316px;
 }
 
 .rail-close {
@@ -643,10 +829,9 @@ onBeforeUnmount(() => {
 
 .eyebrow {
   margin: 0 0 14px;
-  padding-right: 46px;
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 8.5px;
-  letter-spacing: 1.8px;
+  font-size: 9px;
+  letter-spacing: 2.4px;
   color: var(--ink-soft);
   opacity: 0.75;
 }
@@ -654,7 +839,7 @@ onBeforeUnmount(() => {
 .title {
   margin: 0;
   font-family: 'Songti SC', 'STSong', 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
-  font-size: 34px;
+  font-size: 40px;
   font-weight: 700;
   line-height: 1.06;
   letter-spacing: 2px;
@@ -714,8 +899,7 @@ onBeforeUnmount(() => {
 
 .legend {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
+  gap: 18px;
   padding: 10px 0 0;
   font-size: 10px;
   letter-spacing: 0.4px;
@@ -934,6 +1118,175 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
+.search {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  z-index: 50;
+  width: min(420px, calc(100% - 44px));
+  transform: translateX(-50%);
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  background: rgba(249, 245, 237, 0.96);
+  border: 1px solid rgba(52, 40, 28, 0.24);
+  border-radius: 2px;
+  box-shadow: 0 3px 14px rgba(52, 40, 28, 0.1);
+}
+
+.search-box input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  font-family: inherit;
+  font-size: 12.5px;
+  letter-spacing: 0.4px;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+
+.search-box input::placeholder {
+  color: rgba(107, 95, 81, 0.7);
+}
+
+.search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.search-clear:hover {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.search-results {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  background: rgba(249, 245, 237, 0.98);
+  border: 1px solid rgba(52, 40, 28, 0.2);
+  border-radius: 2px;
+  box-shadow: 0 12px 28px rgba(52, 40, 28, 0.18);
+}
+
+.search-group {
+  margin: 0;
+  padding: 9px 12px 5px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 1.6px;
+  color: rgba(107, 95, 81, 0.85);
+}
+
+.search-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: inherit;
+  text-align: left;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  transition: 0.16s;
+}
+
+.search-item:hover {
+  background: rgba(178, 58, 47, 0.06);
+  border-left-color: var(--vermilion);
+}
+
+.search-pin {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--vermilion);
+  border-radius: 50%;
+}
+
+.search-road-line {
+  flex: none;
+  width: 12px;
+  height: 2px;
+  background: var(--indigo);
+}
+
+.search-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-main b {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-main i {
+  font-size: 9.5px;
+  font-style: normal;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-count {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 9px;
+  color: var(--ink-soft);
+  border: 1px solid rgba(52, 40, 28, 0.22);
+  border-radius: 2px;
+}
+
+.search-empty {
+  margin: 0;
+  padding: 14px 12px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
 .frame {
   position: absolute;
   inset: 20px;
@@ -1113,7 +1466,7 @@ onBeforeUnmount(() => {
   z-index: 25;
   display: flex;
   flex-direction: column;
-  width: 232px;
+  width: 296px;
   flex-shrink: 0;
   background: #14161a;
   color: #e6dfd1;
@@ -1122,19 +1475,19 @@ onBeforeUnmount(() => {
 }
 
 .monitor.is-closed {
-  margin-right: -232px;
+  margin-right: -296px;
 }
 
 .mon-head {
   position: relative;
-  padding: 22px 16px 14px;
+  padding: 26px 20px 16px;
   border-bottom: 1px solid rgba(230, 223, 209, 0.12);
 }
 
 .mon-close {
   position: absolute;
-  top: 20px;
-  right: 16px;
+  top: 24px;
+  right: 20px;
   padding: 3px 8px;
   font-family: inherit;
   font-size: 9.5px;
@@ -1151,6 +1504,27 @@ onBeforeUnmount(() => {
   color: #14161a;
   background: #20d9a2;
   border-color: #20d9a2;
+}
+
+.mon-add {
+  position: absolute;
+  top: 19px;
+  right: 74px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.8px;
+  color: #14161a;
+  background: #20d9a2;
+  border: 1px solid #20d9a2;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: 0.18s;
+}
+
+.mon-add:hover {
+  color: #e6dfd1;
+  background: transparent;
 }
 
 .mon-eyebrow {
@@ -1241,7 +1615,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 3px 8px;
   width: 100%;
-  padding: 10px 16px 10px 15px;
+  padding: 10px 20px 10px 18px;
   font-family: inherit;
   text-align: left;
   color: inherit;
@@ -1285,7 +1659,6 @@ onBeforeUnmount(() => {
 }
 
 .mon-count {
-  grid-area: count;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1299,9 +1672,62 @@ onBeforeUnmount(() => {
   border-radius: 2px;
 }
 
+.mon-tools {
+  grid-area: count;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mon-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: #8e97a5;
+  background: transparent;
+  border: 1px solid rgba(230, 223, 209, 0.2);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: 0.18s;
+}
+
+.mon-edit:hover {
+  color: #14161a;
+  background: #20d9a2;
+  border-color: #20d9a2;
+}
+
+.mon-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: #8e97a5;
+  background: transparent;
+  border: 1px solid rgba(230, 223, 209, 0.2);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: 0.18s;
+}
+
+.mon-del:hover {
+  color: #14161a;
+  background: #e8452c;
+  border-color: #e8452c;
+}
+
 .cam-list {
   margin: 0 0 10px;
-  padding: 0 16px 2px 34px;
+  padding: 0 20px 2px 40px;
   list-style: none;
 }
 
@@ -1423,7 +1849,7 @@ onBeforeUnmount(() => {
     right: 0;
     bottom: 0;
     z-index: 40;
-    width: 260px;
+    width: 300px;
     transform: translateX(100%);
     transition: transform 0.32s ease;
     box-shadow: -10px 0 30px rgba(20, 22, 26, 0.22);
@@ -1475,6 +1901,15 @@ onBeforeUnmount(() => {
   .stage {
     flex: 1;
     min-height: 0;
+  }
+
+  .search {
+    top: 12px;
+    width: calc(100% - 24px);
+  }
+
+  .search-results {
+    max-height: 260px;
   }
 
   .edition {
