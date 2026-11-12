@@ -3,20 +3,27 @@ import { defineStore } from 'pinia'
 import monitorData from '@/assets/geo/monitor-points.json'
 
 const STORAGE_KEY = 'quanzhou-monitor-points-v1'
+// 旧版本（地图内就地编辑）使用的键，首次加载时自动迁移
+const LEGACY_STORAGE_KEY = 'qz-monitor-points'
 
 function cloneDefaults() {
   return JSON.parse(JSON.stringify(monitorData.intersections))
 }
 
-function loadPoints() {
+function parseStoredPoints(raw) {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (!saved) return cloneDefaults()
-    const parsed = JSON.parse(saved)
-    return Array.isArray(parsed) && parsed.length ? parsed : cloneDefaults()
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.length ? parsed : null
   } catch {
-    return cloneDefaults()
+    return null
   }
+}
+
+function loadPoints() {
+  const saved =
+    parseStoredPoints(localStorage.getItem(STORAGE_KEY)) ??
+    parseStoredPoints(localStorage.getItem(LEGACY_STORAGE_KEY))
+  return saved ?? cloneDefaults()
 }
 
 export const useMonitorStore = defineStore('monitor', () => {
@@ -66,6 +73,27 @@ export const useMonitorStore = defineStore('monitor', () => {
     if (index !== -1) points.value.splice(index, 1)
   }
 
+  // 导入 JSON 时整体替换；返回是否成功，失败抛出可读错误
+  function replacePoints(list) {
+    if (!Array.isArray(list) || !list.length) throw new Error('文件里没有点位数据')
+    const mapped = list.map((item) => {
+      const lng = Number(item.lng)
+      const lat = Number(item.lat)
+      if (!item.name || !Number.isFinite(lng) || !Number.isFinite(lat) || !Array.isArray(item.cameras)) {
+        throw new Error('点位格式不正确，需要包含 name、lng、lat、cameras')
+      }
+      return {
+        id: item.id || nextId(),
+        name: item.name,
+        roads: item.roads ?? '',
+        lng,
+        lat,
+        cameras: item.cameras.map((cam) => normalizeCamera(cam)),
+      }
+    })
+    points.value = mapped
+  }
+
   function normalizeCamera(cam) {
     return {
       scene: cam.scene,
@@ -82,5 +110,6 @@ export const useMonitorStore = defineStore('monitor', () => {
     addPoint,
     updatePoint,
     removePoint,
+    replacePoints,
   }
 })

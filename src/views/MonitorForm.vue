@@ -27,7 +27,7 @@ const form = reactive({
   roads: '',
   lat: '',
   lng: '',
-  cameras: [{ scene: '', dir: '东', type: 'traffic' }],
+  cameras: [{ scene: '', dir: '东', type: 'traffic', bearing: 90 }],
 })
 
 const error = ref('')
@@ -51,6 +51,38 @@ function dirWithSuffix(dir) {
   return `${label}向`
 }
 
+const clampBearing = (bearing) => (((Number(bearing) || 0) % 360) + 360) % 360
+
+// 弧度角度按正北为 0°，顺时针递增
+function bearingToDir(bearing) {
+  const labels = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
+  return labels[Math.round(clampBearing(bearing) / 45) % 8]
+}
+
+function syncBearing(cam) {
+  cam.bearing = bearingFor(cam.dir)
+}
+
+function updateBearingFromPointer(event, cam) {
+  const rect = event.currentTarget.getBoundingClientRect()
+  const dx = event.clientX - (rect.left + rect.width / 2)
+  const dy = event.clientY - (rect.top + rect.height / 2)
+  if (!dx && !dy) return
+  cam.bearing = Math.round(clampBearing((Math.atan2(dx, -dy) * 180) / Math.PI))
+  cam.dir = bearingToDir(cam.bearing)
+}
+
+function startDirDrag(event, cam) {
+  event.preventDefault()
+  event.currentTarget.setPointerCapture(event.pointerId)
+  updateBearingFromPointer(event, cam)
+}
+
+function moveDirDrag(event, cam) {
+  if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+  updateBearingFromPointer(event, cam)
+}
+
 function loadEditingPoint() {
   const point = store.points.find((item) => item.id === editingId.value)
   if (!point) {
@@ -61,20 +93,34 @@ function loadEditingPoint() {
   form.roads = point.roads
   form.lat = String(point.lat)
   form.lng = String(point.lng)
-  form.cameras = point.cameras.map((cam) => ({
-    scene: cam.scene,
-    dir: directionValue(cam.dir),
-    type: cam.type || 'traffic',
-  }))
+  form.cameras = point.cameras.map((cam) => {
+    const bearing = Number.isFinite(Number(cam.bearing)) ? clampBearing(cam.bearing) : bearingFor(cam.dir)
+    return {
+      scene: cam.scene,
+      dir: bearingToDir(bearing),
+      type: cam.type || 'traffic',
+      bearing,
+    }
+  })
+  coordsTouched.value = true
+}
+
+function applyQueryPrefill() {
+  const { lat, lng, name, roads } = route.query
+  if (Number.isFinite(Number(lat)) && lat !== '') form.lat = String(lat)
+  if (Number.isFinite(Number(lng)) && lng !== '') form.lng = String(lng)
+  if (typeof name === 'string') form.name = name
+  if (typeof roads === 'string') form.roads = roads
+  if (form.lat && form.lng) coordsTouched.value = true
 }
 
 function addCameraRow() {
-  form.cameras.push({ scene: '', dir: '东', type: 'traffic' })
+  form.cameras.push({ scene: '', dir: '东', type: 'traffic', bearing: 90 })
 }
 
 function removeCameraRow(index) {
   if (form.cameras.length === 1) {
-    form.cameras[0] = { scene: '', dir: '东', type: 'traffic' }
+    form.cameras[0] = { scene: '', dir: '东', type: 'traffic', bearing: 90 }
     return
   }
   form.cameras.splice(index, 1)
@@ -141,8 +187,8 @@ function submit() {
   const cameras = form.cameras.map((cam) => ({
     scene: cam.scene.trim(),
     type: cam.type || 'traffic',
-    dir: dirWithSuffix(cam.dir),
-    bearing: bearingFor(cam.dir),
+    dir: dirWithSuffix(bearingToDir(cam.bearing)),
+    bearing: Math.round(clampBearing(cam.bearing)),
   }))
 
   if (isEditing.value) {
@@ -168,6 +214,7 @@ function submit() {
 
 onMounted(() => {
   if (isEditing.value) loadEditingPoint()
+  else applyQueryPrefill()
   setTimeout(() => {
     autoReady = true
   }, 0)
@@ -235,12 +282,30 @@ onBeforeUnmount(() => {
           </label>
           <label class="field">
             <span>方位</span>
-            <select v-model="cam.dir">
+            <select v-model="cam.dir" @change="syncBearing(cam)">
               <option v-for="option in DIR_OPTIONS" :key="option.label" :value="option.label">
                 {{ option.label }}向
               </option>
             </select>
           </label>
+          <div
+            class="compass"
+            title="拖动指针调整朝向"
+            @pointerdown="startDirDrag($event, cam)"
+            @pointermove="moveDirDrag($event, cam)"
+          >
+            <svg viewBox="0 0 80 80" aria-hidden="true">
+              <circle cx="40" cy="40" r="31" fill="none" stroke="rgba(52, 40, 28, 0.28)" stroke-width="1" />
+              <circle cx="40" cy="40" r="24" fill="none" stroke="rgba(52, 40, 28, 0.14)" stroke-width="1" />
+              <text x="40" y="10" text-anchor="middle">N</text>
+              <g :style="{ transform: `rotate(${cam.bearing}deg)`, transformOrigin: '40px 40px' }">
+                <line x1="40" y1="66" x2="40" y2="24" stroke="#b23a2f" stroke-width="2.4" stroke-linecap="round" />
+                <path d="M40 14 L46 27 L34 27 Z" fill="#b23a2f" />
+              </g>
+              <circle cx="40" cy="40" r="4" fill="#241f1a" />
+            </svg>
+            <span class="compass-val">{{ Math.round(cam.bearing) }}°</span>
+          </div>
           <button
             type="button"
             class="remove-cam"
@@ -444,11 +509,47 @@ onBeforeUnmount(() => {
 
 .cam-row {
   display: grid;
-  grid-template-columns: 1fr 120px 34px;
+  grid-template-columns: 1fr 120px 92px 34px;
   align-items: end;
   gap: 12px;
   padding: 12px 0;
   border-bottom: 1px dashed rgba(52, 40, 28, 0.16);
+}
+
+.compass {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 54px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.compass:active {
+  cursor: grabbing;
+}
+
+.compass svg {
+  width: 56px;
+  height: 56px;
+  margin-bottom: -10px;
+}
+
+.compass text {
+  font-size: 8px;
+  letter-spacing: 0.5px;
+  fill: rgba(52, 40, 28, 0.5);
+}
+
+.compass-val {
+  position: relative;
+  z-index: 1;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 9px;
+  color: #6b5f51;
 }
 
 .cam-row:first-of-type {
@@ -558,6 +659,10 @@ onBeforeUnmount(() => {
   .grid.two,
   .cam-row {
     grid-template-columns: 1fr;
+  }
+
+  .compass {
+    height: 76px;
   }
 
   .remove-cam {

@@ -86,11 +86,14 @@ const railOpen = ref(true)
 const panelOpen = ref(window.innerWidth > 1180)
 const searchQuery = ref('')
 const searchOpen = ref(false)
+const pickMode = ref(false)
+const importInput = ref(null)
 
 let map = null
 let districtLayer = null
 let districtBounds = null
 let labelLayerGroup = null
+let camLabelGroup = null
 const layersByRoad = {}
 const camMarkers = {}
 
@@ -204,6 +207,7 @@ function selectPoint(id) {
   intersections.value.forEach((item) => {
     camMarkers[item.id]?.setIcon(cameraIcon(item, item.id === activePoint.value, compact))
   })
+  updateLabels()
   if (!activePoint.value) return
   const item = intersections.value.find((x) => x.id === activePoint.value)
   if (!item || !map) return
@@ -253,6 +257,94 @@ function deletePoint(id) {
   if (confirmed) monitorStore.removePoint(id)
 }
 
+function pointSegMeters(lat, lng, a, b, cos) {
+  const px = (lng - a[0]) * 111320 * cos
+  const py = (lat - a[1]) * 111320
+  const bx = (b[0] - a[0]) * 111320 * cos
+  const by = (b[1] - a[1]) * 111320
+  const len2 = bx * bx + by * by
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, (px * bx + py * by) / len2))
+  return Math.hypot(px - bx * t, py - by * t)
+}
+
+// 吸附 30 米内最近的横向 / 纵向道路
+function nearestRoad(lat, lng, dir) {
+  const cos = Math.cos((lat * Math.PI) / 180)
+  let best = null
+  roads.forEach((road) => {
+    if (road.dir !== dir) return
+    road.segments.forEach((segment) => {
+      for (let i = 1; i < segment.coords.length; i += 1) {
+        const distance = pointSegMeters(lat, lng, segment.coords[i - 1], segment.coords[i], cos)
+        if (distance <= 30 && (!best || distance < best.distance)) best = { road, distance }
+      }
+    })
+  })
+  return best?.road ?? null
+}
+
+function togglePickMode() {
+  pickMode.value = !pickMode.value
+  if (pickMode.value) clearSelection()
+}
+
+// 地图点选后带着坐标、道路名跳到表单页继续填写相机
+function handleMapClick(event) {
+  if (!pickMode.value) return
+  const { lat, lng } = event.latlng
+  const names = [
+    nearestRoad(lat, lng, 'horizontal'),
+    nearestRoad(lat, lng, 'vertical'),
+  ]
+    .filter(Boolean)
+    .map((road) => road.name)
+  pickMode.value = false
+  router.push({
+    path: '/monitor/new',
+    query: {
+      lat: lat.toFixed(6),
+      lng: lng.toFixed(6),
+      roads: names.join(' × '),
+      name: names.map((name) => name.replace(/(大道|路|街|巷|支路)$/u, '')).join(''),
+    },
+  })
+}
+
+function handleKeydown(event) {
+  if (event.key === 'Escape' && pickMode.value) pickMode.value = false
+}
+
+function exportPoints() {
+  const payload = {
+    source: 'quanzhou-monitor-points',
+    total: { intersections: totalIntersections.value, cameras: totalCameras.value },
+    intersections: intersections.value,
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = 'monitor-points.json'
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function pickImportFile() {
+  importInput.value?.click()
+}
+
+async function importPoints(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  try {
+    const parsed = JSON.parse(await file.text())
+    monitorStore.replacePoints(Array.isArray(parsed) ? parsed : parsed.intersections)
+  } catch (error) {
+    window.alert(`导入失败：${error.message}`)
+  }
+}
+
 function addDistrictNames(layer) {
   const props = layer.feature.properties
   const bounds = layer.getBounds()
@@ -273,8 +365,8 @@ function addDistrictNames(layer) {
   }).addTo(map)
 }
 
-function labelAnchor(road, ratio = 0.5) {
-  const longest = road.segments.reduce((a, b) => (a.length >= b.length ? a : b))
+function labelAnchor(road, ratio = 0.5, segments = road.segments) {
+  const longest = segments.reduce((a, b) => (a.length >= b.length ? a : b))
   const coords = longest.coords
   const segDist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1])
   let total = 0
@@ -307,70 +399,151 @@ function boxesOverlap(a, b) {
   return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y)
 }
 
-// 按优先级做屏幕空间碰撞剔除，保证任意缩放下文字不互相压叠
-function updateLabels() {
-  if (!map || !labelLayerGroup) return
-  labelLayerGroup.clearLayers()
-  if (!showLabels.value) return
+function escapeHtml(value) {
+  return String(value).replace(
+    /[&<>"']/g,
+    (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch],
+  )
+}
 
-  const zoom = map.getZoom()
-  const candidates = roads
-    .filter((road) => {
-      if (OLD_TOWN.has(road.name)) return true
-      if (road.tier === 'main') return road.total >= 700
-      if (zoom >= 14) return road.total >= 350
-      if (zoom >= 13) return road.total >= 600
-      return road.total >= 1200
-    })
-    .map((road) => ({
-      road,
-      score:
-        (road.tier === 'main' ? 10 : 1) +
-        (LABEL_PRIORITY[road.type] ?? 1) +
-        Math.min(road.total / 4000, 2) +
-        (OLD_TOWN.has(road.name) ? 12 : 0),
-    }))
-    .sort((a, b) => b.score - a.score)
+function segmentBounds(coords) {
+  let south = Infinity
+  let west = Infinity
+  let north = -Infinity
+  let east = -Infinity
+  coords.forEach(([lng, lat]) => {
+    if (lat < south) south = lat
+    if (lat > north) north = lat
+    if (lng < west) west = lng
+    if (lng > east) east = lng
+  })
+  return L.latLngBounds([south, west], [north, east])
+}
 
-  const placed = []
-  const isNarrow = window.innerWidth <= 660
-  const fontSize = isNarrow ? 9.5 : 10.5
-  const charSize = fontSize + 1.5
+// 预计算每条道路的包围盒，避免每个缩放级别重复遍历全部折线
+const roadBounds = new Map(
+  roads.map((road) => [road, segmentBounds(road.segments.flatMap((segment) => segment.coords))]),
+)
+
+// 点位名称常驻在地图标记下方，缩小后也不会认不出是哪个路口
+function placeCameraLabels(placed, zoom, onlyActive) {
+  const compact = zoom < 13
+  const fontSize = compact ? 10.5 : 11.5
+  const charSize = fontSize + 1.2
   const size = map.getSize()
-  // 沿道路多个锚点尝试，避免核心街名被相邻标注挤掉
-  const RATIOS = [0.5, 0.32, 0.68, 0.18, 0.82]
+  // 默认放正下方，被占用时依次尝试上方与左右侧，尽量不让名称消失
+  const offsets = compact
+    ? [[0, 22], [0, -22], [20, 0], [-20, 0]]
+    : [[0, 44], [0, -44], [46, 0], [-46, 0]]
+  const items = intersections.value.filter((item) =>
+    onlyActive ? item.id === activePoint.value : item.id !== activePoint.value,
+  )
 
-  for (const item of candidates) {
-    const { road } = item
-    const vertical = road.dir === 'vertical'
-    const w = vertical ? charSize + 6 : road.name.length * charSize + 8
-    const h = vertical ? road.name.length * charSize + 8 : charSize + 8
+  for (const item of items) {
+    const p = map.latLngToContainerPoint([item.lat, item.lng])
+    const w = item.name.length * charSize + 12
+    const h = fontSize + 9
 
-    let chosen = null
-    for (const ratio of RATIOS) {
-      const point = labelAnchor(road, ratio)
-      const p = map.latLngToContainerPoint(point)
-      const box = { x: p.x - w / 2, y: p.y - h / 2, w, h }
-      if (box.x < 10 || box.y < 10 || box.x + w > size.x - 10 || box.y + h > size.y - 10) continue
-      if (placed.some((b) => boxesOverlap(b, box))) continue
-      chosen = { point, box }
+    for (const [dx, dy] of offsets) {
+      const box = { x: p.x + dx - w / 2, y: p.y + dy - h / 2, w, h }
+      if (box.x < 6 || box.y < 6 || box.x + w > size.x - 6 || box.y + h > size.y - 6) continue
+      if (placed.some((other) => boxesOverlap(other, box))) continue
+      placed.push(box)
+      L.marker(map.containerPointToLatLng([p.x + dx, p.y + dy]), {
+        icon: L.divIcon({
+          className: 'cam-label-wrap',
+          html: `<span class="cam-label${compact ? ' compact' : ''}${item.id === activePoint.value ? ' on' : ''}">${escapeHtml(item.name)}</span>`,
+          iconSize: null,
+        }),
+        interactive: false,
+        keyboard: false,
+        pane: 'camLabelPane',
+      }).addTo(camLabelGroup)
       break
     }
-    if (!chosen) continue
-    placed.push(chosen.box)
+  }
+}
 
-    const isMain = road.tier === 'main'
-    const icon = L.divIcon({
-      className: 'road-label-wrap',
-      html: `<span class="road-label${isMain ? ' main' : ''}${vertical ? ' v' : ''}">${road.name}</span>`,
-      iconSize: null,
-    })
-    L.marker(chosen.point, {
-      icon,
-      interactive: false,
-      keyboard: false,
-      pane: 'roadLabelPane',
-    }).addTo(labelLayerGroup)
+// 任何缩放级别都参与渲染，只按视口与屏幕碰撞剔除，避免重叠
+function updateLabels() {
+  if (!map || !labelLayerGroup || !camLabelGroup) return
+  labelLayerGroup.clearLayers()
+  camLabelGroup.clearLayers()
+
+  const zoom = map.getZoom()
+  const size = map.getSize()
+  const placed = []
+
+  // 摄像头点位名称先占位（选中点最优先），滚轮缩放时也不会被路名挤掉
+  placeCameraLabels(placed, zoom, true)
+  placeCameraLabels(placed, zoom, false)
+
+  if (showLabels.value) {
+    const viewport = map.getBounds().pad(0.08)
+    const isNarrow = window.innerWidth <= 660
+    const fontSize = isNarrow ? 11 : 12
+    // 沿道路多个锚点尝试，尽量为每条可见道路找到不重叠的位置
+    const RATIOS = [0.5, 0.36, 0.64, 0.24, 0.76, 0.12, 0.88]
+
+    // 不再按缩放阈值隐藏，视口内所有道路都参与，只做碰撞剔除
+    const candidates = roads
+      .map((road) => {
+        const bounds = roadBounds.get(road)
+        if (!bounds || !bounds.intersects(viewport)) return null
+        const segs = road.segments.filter((segment) => segmentBounds(segment.coords).intersects(viewport))
+        return segs.length ? { road, segs } : null
+      })
+      .filter(Boolean)
+      .map((candidate) => ({
+        ...candidate,
+        score:
+          (candidate.road.tier === 'main' ? 20 : 4) +
+          (LABEL_PRIORITY[candidate.road.type] ?? 1) * 1.5 +
+          Math.min(candidate.road.total / 3000, 3) +
+          (OLD_TOWN.has(candidate.road.name) ? 15 : 0),
+      }))
+      .sort((a, b) => b.score - a.score || a.road.name.localeCompare(b.road.name))
+
+    // 同一条道路在数据里可能拆成多段，视口内只保留一个名称
+    const labeled = new Set()
+
+    for (const item of candidates) {
+      const { road, segs } = item
+      if (labeled.has(road.name)) continue
+      const vertical = road.dir === 'vertical'
+      const isMain = road.tier === 'main'
+      const labelSize = isMain ? 13 : fontSize
+      const lineH = labelSize * 1.25
+      const w = vertical ? labelSize + 10 : road.name.length * (labelSize + 1) + 10
+      const h = vertical ? road.name.length * (lineH + 2) + 6 : lineH + 8
+
+      let chosen = null
+      for (const ratio of RATIOS) {
+        const point = labelAnchor(road, ratio, segs)
+        const p = map.latLngToContainerPoint(point)
+        // 预留 3px 间距，避免文字贴在一起显得拥挤
+        const box = { x: p.x - w / 2 - 3, y: p.y - h / 2 - 3, w: w + 6, h: h + 6 }
+        if (box.x < 8 || box.y < 8 || box.x + w > size.x - 8 || box.y + h > size.y - 8) continue
+        if (placed.some((b) => boxesOverlap(b, box))) continue
+        chosen = { point, box }
+        break
+      }
+      if (!chosen) continue
+      placed.push(chosen.box)
+      labeled.add(road.name)
+
+      const icon = L.divIcon({
+        className: 'road-label-wrap',
+        html: `<span class="road-label${isMain ? ' main' : ''}${vertical ? ' v' : ''}">${road.name}</span>`,
+        iconSize: null,
+      })
+      L.marker(chosen.point, {
+        icon,
+        interactive: false,
+        keyboard: false,
+        pane: 'roadLabelPane',
+      }).addTo(labelLayerGroup)
+    }
   }
 }
 
@@ -403,6 +576,7 @@ function resetView() {
   refreshStyles()
   activePoint.value = ''
   intersections.value.forEach((item) => camMarkers[item.id]?.setIcon(cameraIcon(item, false, true)))
+  updateLabels()
   if (map && districtBounds) {
     map.flyToBounds(districtBounds, { ...fitPadding(), duration: 0.6 })
   }
@@ -441,6 +615,7 @@ function syncCameraMarkers() {
       .on('click', () => selectPoint(item.id))
       .addTo(map)
   })
+  updateLabels()
 }
 
 onMounted(() => {
@@ -488,6 +663,8 @@ onMounted(() => {
   })
 
   labelLayerGroup = L.layerGroup().addTo(map)
+  camLabelGroup = L.layerGroup().addTo(map)
+  map.createPane('camLabelPane').style.zIndex = 615
   map.createPane('camPane').style.zIndex = 605
 
   syncCameraMarkers()
@@ -498,6 +675,8 @@ onMounted(() => {
     updateLabels()
     updateCameraIcons()
   })
+  map.on('click', handleMapClick)
+  window.addEventListener('keydown', handleKeydown)
   map.fitBounds(districtBounds, { ...fitPadding(), animate: false })
   map.setMaxBounds(districtBounds.pad(0.08))
   updateLabels()
@@ -537,6 +716,7 @@ onBeforeUnmount(() => {
   clearTimeout(resizeTimer)
   clearTimeout(layoutTimer)
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('keydown', handleKeydown)
   if (map) {
     map.remove()
     map = null
@@ -615,7 +795,11 @@ onBeforeUnmount(() => {
     </aside>
 
     <main class="stage">
-      <div ref="mapEl" class="map" :class="{ 'is-loaded': loaded }"></div>
+      <div ref="mapEl" class="map" :class="{ 'is-loaded': loaded, 'pick-on': pickMode }"></div>
+
+      <div v-if="pickMode" class="pick-hint">
+        点击地图选择路口位置 · 自动吸附 30m 内道路 · Esc 取消
+      </div>
 
       <div class="search" :class="{ 'has-results': searchOpen && searchQuery }">
         <div class="search-box">
@@ -716,6 +900,20 @@ onBeforeUnmount(() => {
         <div class="mon-legend">
           <span><i class="dot traffic"></i>路口交通机</span>
           <span><i class="dot ptz"></i>联动快球</span>
+        </div>
+        <div class="mon-actions">
+          <button type="button" class="mon-act" :class="{ on: pickMode }" @click="togglePickMode">
+            {{ pickMode ? '点选中…' : '地图点选' }}
+          </button>
+          <button type="button" class="mon-act" @click="exportPoints">导出</button>
+          <button type="button" class="mon-act" @click="pickImportFile">导入</button>
+          <input
+            ref="importInput"
+            type="file"
+            accept="application/json,.json"
+            hidden
+            @change="importPoints"
+          />
         </div>
       </header>
 
@@ -1382,7 +1580,7 @@ onBeforeUnmount(() => {
   display: block;
   transform: translate(-50%, -50%);
   font-family: 'Songti SC', 'STSong', 'Noto Serif SC', 'SimSun', serif;
-  font-size: 17px;
+  font-size: 19px;
   font-weight: 600;
   letter-spacing: 7px;
   color: rgba(36, 31, 26, 0.3);
@@ -1399,7 +1597,8 @@ onBeforeUnmount(() => {
   display: block;
   transform: translate(-50%, -50%);
   padding: 0 3px;
-  font-size: 10.5px;
+  font-size: 12px;
+  line-height: 1.25;
   letter-spacing: 0.4px;
   color: #6b5f51;
   white-space: nowrap;
@@ -1411,9 +1610,41 @@ onBeforeUnmount(() => {
 }
 
 :deep(.road-label.main) {
-  font-size: 11.5px;
+  font-size: 13px;
   font-weight: 600;
   color: #3c3229;
+}
+
+:deep(.cam-label-wrap) {
+  background: transparent;
+  border: 0;
+}
+
+:deep(.cam-label) {
+  display: block;
+  transform: translate(-50%, -50%);
+  padding: 1px 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: #1b1e23;
+  white-space: nowrap;
+  pointer-events: none;
+  background: rgba(249, 245, 237, 0.92);
+  border: 1px solid rgba(36, 31, 26, 0.34);
+  border-radius: 2px;
+  box-shadow: 0 1px 4px rgba(52, 40, 28, 0.18);
+}
+
+:deep(.cam-label.compact) {
+  padding: 0 4px;
+  font-size: 10.5px;
+}
+
+:deep(.cam-label.on) {
+  color: #f7f2e7;
+  background: #b23a2f;
+  border-color: #b23a2f;
 }
 
 :deep(.road-label.v) {
@@ -1425,7 +1656,7 @@ onBeforeUnmount(() => {
 
 :deep(.hover-label) {
   padding: 3px 7px;
-  font-size: 10.5px;
+  font-size: 11.5px;
   letter-spacing: 0.5px;
   color: #3c3229;
   background: rgba(249, 245, 237, 0.96);
@@ -1490,7 +1721,7 @@ onBeforeUnmount(() => {
   right: 20px;
   padding: 3px 8px;
   font-family: inherit;
-  font-size: 9.5px;
+  font-size: 10.5px;
   letter-spacing: 1px;
   color: #9aa3b1;
   background: transparent;
@@ -1512,7 +1743,7 @@ onBeforeUnmount(() => {
   right: 74px;
   padding: 4px 10px;
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.8px;
   color: #14161a;
   background: #20d9a2;
@@ -1530,7 +1761,7 @@ onBeforeUnmount(() => {
 .mon-eyebrow {
   margin: 0 0 10px;
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 2.2px;
   color: #20d9a2;
   opacity: 0.8;
@@ -1539,7 +1770,7 @@ onBeforeUnmount(() => {
 .mon-head h2 {
   margin: 0;
   font-family: 'Songti SC', 'STSong', 'Noto Serif SC', 'Source Han Serif SC', 'SimSun', serif;
-  font-size: 21px;
+  font-size: 23px;
   font-weight: 600;
   letter-spacing: 2px;
 }
@@ -1549,7 +1780,7 @@ onBeforeUnmount(() => {
   gap: 14px;
   margin-top: 10px;
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.8px;
   color: #8e97a5;
 }
@@ -1558,9 +1789,58 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 16px;
   margin-top: 12px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.5px;
   color: #b9b2a4;
+}
+
+.mon-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.mon-act {
+  padding: 4px 9px;
+  font-family: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  color: #c9d2df;
+  background: transparent;
+  border: 1px solid rgba(230, 223, 209, 0.24);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: 0.18s;
+}
+
+.mon-act:hover,
+.mon-act.on {
+  color: #14161a;
+  background: #20d9a2;
+  border-color: #20d9a2;
+}
+
+.pick-hint {
+  position: absolute;
+  left: 26px;
+  bottom: 74px;
+  z-index: 40;
+  padding: 7px 12px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: #f7f2e7;
+  background: rgba(20, 22, 26, 0.9);
+  border: 1px solid rgba(32, 217, 162, 0.5);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.map.pick-on {
+  cursor: crosshair;
+}
+
+.map.pick-on :deep(.leaflet-camPane-pane) {
+  pointer-events: none;
 }
 
 .dot {
@@ -1637,13 +1917,13 @@ onBeforeUnmount(() => {
 .mon-no {
   grid-area: no;
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
   color: #6d7683;
 }
 
 .mon-name {
   grid-area: name;
-  font-size: 12.5px;
+  font-size: 13.5px;
   letter-spacing: 0.6px;
 }
 
@@ -1653,7 +1933,7 @@ onBeforeUnmount(() => {
 
 .mon-road {
   grid-area: road;
-  font-size: 9.5px;
+  font-size: 10.5px;
   letter-spacing: 0.3px;
   color: #7f8894;
 }
@@ -1666,7 +1946,7 @@ onBeforeUnmount(() => {
   height: 20px;
   padding: 0 5px;
   font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
   color: #d9d2c4;
   border: 1px solid rgba(230, 223, 209, 0.22);
   border-radius: 2px;
@@ -1736,7 +2016,7 @@ onBeforeUnmount(() => {
   align-items: baseline;
   gap: 8px;
   padding: 5px 0;
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: #aab2be;
   border-top: 1px dashed rgba(230, 223, 209, 0.08);
 }
@@ -1765,7 +2045,7 @@ onBeforeUnmount(() => {
 
 .cam-dir {
   flex: none;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   color: #e6dfd1;
 }
@@ -1829,7 +2109,7 @@ onBeforeUnmount(() => {
 
 :deep(.cam-tip) {
   padding: 3px 7px;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.5px;
   color: #e6dfd1;
   background: rgba(20, 22, 26, 0.94);
